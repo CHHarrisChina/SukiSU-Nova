@@ -88,11 +88,11 @@ static write_op_fn orig_context_write, orig_access_write;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 #define ksu_avc_has_perm_compat(...) avc_has_perm(__VA_ARGS__)
 #define ksu_security_bounded_transition_compat(...) security_bounded_transition(__VA_ARGS__)
-#define ksu_security_validate_transition_compat(...) security_validate_transition(__VA_ARGS__)
+#define ksu_security_validate_transition_compat(...) security_validate_transition_fn(__VA_ARGS__)
 #else
 #define ksu_avc_has_perm_compat(...) avc_has_perm(&selinux_state, __VA_ARGS__)
 #define ksu_security_bounded_transition_compat(...) security_bounded_transition(&selinux_state, __VA_ARGS__)
-#define ksu_security_validate_transition_compat(...) security_validate_transition(&selinux_state, __VA_ARGS__)
+#define ksu_security_validate_transition_compat(...) security_validate_transition_fn(__VA_ARGS__)
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
@@ -325,6 +325,14 @@ call_orig:
 }
 
 static int (*inode_doinit_with_dentry_fn)(struct inode *inode, struct dentry *dentry);
+static int (*cap_capable_fn)(const struct cred *, struct user_namespace *, int, unsigned int);
+static unsigned long init_user_ns_addr;
+static int (*inode_owner_or_capable_fn)(void *, struct inode *);
+static int (*security_validate_transition_fn)(u32, u32, u32, u16);
+static struct audit_buffer *(*audit_log_start_fn)(struct audit_context *, gfp_t, int);
+static void (*audit_log_format_fn)(struct audit_buffer *, const char *, ...);
+static void (*audit_log_n_untrustedstring_fn)(struct audit_buffer *, int, const char *);
+static void (*audit_log_end_fn)(struct audit_buffer *);
 static struct ksu_lsm_hook selinux_inode_setxattr_hook;
 typedef typeof(((union security_list_options *)0)->inode_setxattr) inode_setxattr_fn;
 
@@ -349,7 +357,7 @@ static int __nocfi my_inode_setxattr(struct dentry *dentry, const char *name, co
         goto call_orig;
 
     // Keep native force parsing for callers with CAP_MAC_ADMIN
-    if (!cap_capable(current_cred(), &init_user_ns, CAP_MAC_ADMIN, CAP_OPT_NOAUDIT))
+    if (!cap_capable_fn(current_cred(), (struct user_namespace *)init_user_ns_addr, CAP_MAC_ADMIN, CAP_OPT_NOAUDIT))
         goto call_orig;
 
     sbsec = ksu_selinux_superblock(inode->i_sb);
@@ -357,11 +365,11 @@ static int __nocfi my_inode_setxattr(struct dentry *dentry, const char *name, co
         return -EOPNOTSUPP;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
-    if (!inode_owner_or_capable(idmap, inode))
+    if (!inode_owner_or_capable_fn(idmap, inode))
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
-    if (!inode_owner_or_capable(mnt_userns, inode))
+    if (!inode_owner_or_capable_fn(mnt_userns, inode))
 #else
-    if (!inode_owner_or_capable(inode))
+    if (!inode_owner_or_capable_fn(NULL, inode))
 #endif
         return -EPERM;
 
@@ -393,11 +401,11 @@ static int __nocfi my_inode_setxattr(struct dentry *dentry, const char *name, co
         // Strip only final NUL so embedded NUL bytes remain in audit log
         if (audit_size && ((const char *)value)[audit_size - 1] == '\0')
             audit_size--;
-        ab = audit_log_start(audit_context(), GFP_ATOMIC, AUDIT_SELINUX_ERR);
+        ab = audit_log_start_fn(audit_context(), GFP_ATOMIC, AUDIT_SELINUX_ERR);
         if (ab) {
-            audit_log_format(ab, "op=setxattr invalid_context=");
-            audit_log_n_untrustedstring(ab, value, audit_size);
-            audit_log_end(ab);
+            audit_log_format_fn(ab, "op=setxattr invalid_context=");
+            audit_log_n_untrustedstring_fn(ab, value, audit_size);
+            audit_log_end_fn(ab);
         }
     }
     if (rc)
@@ -433,6 +441,26 @@ static int selinux_hide_init_setxattr()
         return ret;
 
     inode_doinit_with_dentry_fn = ksu_resolve_symbol_for_functable_hook("inode_doinit_with_dentry");
+    {
+        static const char *const names[] = {
+            "cap_capable", "audit_log_start", "audit_log_format",
+            "audit_log_n_untrustedstring", "audit_log_end",
+            "init_user_ns", "inode_owner_or_capable", "security_validate_transition",
+        };
+        unsigned long addrs[ARRAY_SIZE(names)] = {};
+        if (ksu_lookup_kernel_symbols(names, addrs, ARRAY_SIZE(names)) < 0) {
+            pr_err("selinux_hide: audit/cap symbols unresolved\n");
+            return -ENOENT;
+        }
+        cap_capable_fn = (void *)addrs[0];
+        audit_log_start_fn = (void *)addrs[1];
+        audit_log_format_fn = (void *)addrs[2];
+        audit_log_n_untrustedstring_fn = (void *)addrs[3];
+        audit_log_end_fn = (void *)addrs[4];
+        init_user_ns_addr = addrs[5];
+        inode_owner_or_capable_fn = (void *)addrs[6];
+        security_validate_transition_fn = (void *)addrs[7];
+    }
     // Set original before publishing callback to other CPUs
     selinux_inode_setxattr_hook.original = ksu_resolve_symbol_for_functable_hook("selinux_inode_setxattr");
     if (!inode_doinit_with_dentry_fn || !selinux_inode_setxattr_hook.original)

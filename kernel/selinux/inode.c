@@ -1,3 +1,4 @@
+#include "infra/symbol_resolver.h"
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/fs.h>
@@ -19,10 +20,14 @@ int __init ksu_selinux_inode_init(void)
     s32 blob_offset;
     int ret;
 
+    ret = inode_symbols_resolve();
+    if (ret)
+        return ret;
+
     ret = ksu_btf_field("lsm_blob_sizes", "lbs_inode", BTF_KIND_INT, sizeof(int), &blob_field);
     if (ret)
         goto fail;
-    ret = copy_from_kernel_nofault(&blob_offset, (const char *)&selinux_blob_sizes + blob_field.offset,
+    ret = copy_from_kernel_nofault_fn(&blob_offset, (const char *)&selinux_blob_sizes + blob_field.offset,
                                    sizeof(blob_offset));
     if (ret) {
         pr_err("selinux_blob_sizes.lbs_inode unreadable (%d)\n", ret);
@@ -52,7 +57,7 @@ int ksu_selinux_superblock_init(void)
     ret = ksu_btf_field("lsm_blob_sizes", "lbs_superblock", BTF_KIND_INT, sizeof(int), &field);
     if (ret)
         return ret;
-    ret = copy_from_kernel_nofault(&offset, (const char *)&selinux_blob_sizes + field.offset, sizeof(offset));
+    ret = copy_from_kernel_nofault_fn(&offset, (const char *)&selinux_blob_sizes + field.offset, sizeof(offset));
     if (ret)
         return ret;
     if (offset < 0 || offset % __alignof__(struct superblock_security_struct))
