@@ -14,6 +14,23 @@
 
 static u32 inode_blob_offset __ro_after_init;
 
+static long (*copy_from_kernel_nofault_fn)(void *, const void *, size_t);
+
+static int inode_symbols_resolve(void)
+{
+    static const char *const names[] = { "copy_from_kernel_nofault" };
+    unsigned long addrs[ARRAY_SIZE(names)] = {};
+    int ret;
+
+    if (copy_from_kernel_nofault_fn)
+        return 0;
+    ret = ksu_lookup_kernel_symbols(names, addrs, ARRAY_SIZE(names));
+    if (ret < 0)
+        return ret;
+    copy_from_kernel_nofault_fn = (void *)addrs[0];
+    return 0;
+}
+
 int __init ksu_selinux_inode_init(void)
 {
     struct ksu_btf_field blob_field;
